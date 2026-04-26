@@ -39,10 +39,10 @@ sudo apt install -y ffmpeg
 
 ## Kullanım
 
-1. **Resmi yükle** — soldaki kutuya sürükle-bırak.
-2. **Modu seç** — ChatGPT veya Gemini.
+1. **Dosyayı ver** — sürükle-bırak ya da **Drive / HTTPS linki** yapıştır (her iki sekmede de URL kutusu var). Drive linki "linke sahip olan herkes" modunda paylaşılmış olmalı. Maks 200 MB.
+2. **Modu seç** — Görsel için ChatGPT veya Gemini, Video için kaynak.
 3. **Strength** (sadece Gemini için): `gentle` → `maximum`. Logo / düz alan içeren görseller için `gentle` veya `moderate` öneririm.
-4. **Temizle**'ye bas. Sağda metrikler (PSNR/SSIM, profil, pass schedule) ve indirilebilir çıktı.
+4. **Temizle**'ye bas. Sağda metrikler ve indirilebilir çıktı.
 
 ### Gemini modu nasıl çalışır?
 

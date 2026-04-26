@@ -7,3 +7,5 @@ PyWavelets>=1.1
 scikit-learn>=0.24
 matplotlib>=3.4
 tqdm>=4.60
+gdown>=5.0
+requests>=2.28

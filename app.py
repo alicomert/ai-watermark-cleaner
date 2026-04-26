@@ -9,22 +9,30 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 import gradio as gr
 from PIL import Image, PngImagePlugin
 
+try:
+    import gdown  # type: ignore
+except ImportError:
+    gdown = None
+import requests
+
 # Disable Gradio's anonymous usage telemetry.
 os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
 
 TMP_ROOT = Path(tempfile.gettempdir())
-TMP_PREFIXES = ("clean_", "bypass_", "vidclean_")
+TMP_PREFIXES = ("clean_", "bypass_", "vidclean_", "dl_")
 RETENTION_SECONDS = 10 * 60  # 10 dakikadan eski tüm çıktılar silinir
 
 
@@ -75,6 +83,118 @@ if GEMINI_AVAILABLE:
 
 FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None
 FFPROBE_AVAILABLE = shutil.which("ffprobe") is not None
+
+MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024  # 200 MB
+
+
+# ────────────────────────────────────────────────────────────────────────
+# URL → local file (Drive + generic HTTPS)
+# ────────────────────────────────────────────────────────────────────────
+
+def _gdrive_id(url: str) -> str | None:
+    parsed = urlparse(url)
+    if "drive.google.com" not in (parsed.netloc or ""):
+        return None
+    m = re.search(r"/file/d/([a-zA-Z0-9_-]+)", parsed.path)
+    if m:
+        return m.group(1)
+    qs = parse_qs(parsed.query or "")
+    if "id" in qs:
+        return qs["id"][0]
+    m = re.search(r"/d/([a-zA-Z0-9_-]+)", parsed.path)
+    if m:
+        return m.group(1)
+    return None
+
+
+def fetch_url_to_temp(url: str, dir_prefix: str = "dl_") -> Path:
+    """Download a Drive or HTTPS URL into a temp dir; raises on failure / oversize."""
+    url = (url or "").strip()
+    if not url:
+        raise ValueError("URL boş.")
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise ValueError("URL http(s):// ile başlamalı.")
+
+    out_dir = Path(tempfile.mkdtemp(prefix=dir_prefix))
+
+    drive_id = _gdrive_id(url)
+    if drive_id:
+        if gdown is None:
+            raise RuntimeError("gdown kurulu değil — `pip install gdown`.")
+        out_path = out_dir / "download"
+        gdown.download(id=drive_id, output=str(out_path), quiet=True, fuzzy=True)
+        if not out_path.exists() or out_path.stat().st_size == 0:
+            raise RuntimeError(
+                "Drive dosyası indirilemedi. Link 'linke sahip olan herkes' "
+                "modunda paylaşılmış olmalı."
+            )
+        size = out_path.stat().st_size
+        if size > MAX_DOWNLOAD_BYTES:
+            out_path.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"Dosya çok büyük: {size / 1e6:.1f} MB > "
+                f"{MAX_DOWNLOAD_BYTES / 1e6:.0f} MB sınırı."
+            )
+        # Try to detect a sensible extension from magic bytes
+        ext = _guess_ext(out_path)
+        final = out_dir / f"download{ext}"
+        if final != out_path:
+            out_path.rename(final)
+        return final
+
+    # Generic HTTPS download with size guard
+    with requests.get(url, stream=True, timeout=30, allow_redirects=True) as r:
+        r.raise_for_status()
+        cl = int(r.headers.get("Content-Length", "0") or 0)
+        if cl and cl > MAX_DOWNLOAD_BYTES:
+            raise RuntimeError(
+                f"Dosya çok büyük: {cl / 1e6:.1f} MB > "
+                f"{MAX_DOWNLOAD_BYTES / 1e6:.0f} MB sınırı."
+            )
+        # Filename from URL path or fallback
+        suffix = Path(urlparse(url).path).suffix or ""
+        out_path = out_dir / f"download{suffix or '.bin'}"
+        downloaded = 0
+        with open(out_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                downloaded += len(chunk)
+                if downloaded > MAX_DOWNLOAD_BYTES:
+                    f.close()
+                    out_path.unlink(missing_ok=True)
+                    raise RuntimeError(
+                        f"İndirme {MAX_DOWNLOAD_BYTES / 1e6:.0f} MB sınırını aştı."
+                    )
+                f.write(chunk)
+        if not suffix:
+            ext = _guess_ext(out_path)
+            final = out_dir / f"download{ext}"
+            out_path.rename(final)
+            return final
+        return out_path
+
+
+def _guess_ext(path: Path) -> str:
+    """Sniff magic bytes for a few common formats."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(16)
+    except OSError:
+        return ".bin"
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if head[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return ".webp"
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    if head[4:8] == b"ftyp":  # mp4 / mov
+        return ".mp4"
+    if head[:4] == b"\x1aE\xdf\xa3":  # mkv / webm
+        return ".webm"
+    return ".bin"
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -146,12 +266,27 @@ def run_gemini_bypass(input_path: str, strength: str):
     return str(out_path), info
 
 
-def process_image(input_path, source: str, strength: str):
-    if input_path is None:
-        return None, "Önce bir resim yükle."
+def _resolve_input(input_path, url: str | None, prefix: str) -> tuple[str | None, str | None]:
+    """Return (path, error). If url given, download; else use uploaded path."""
+    url = (url or "").strip()
+    if url:
+        try:
+            p = fetch_url_to_temp(url, dir_prefix=prefix)
+            return str(p), None
+        except Exception as exc:
+            return None, f"İndirme hatası: {exc}"
+    if input_path:
+        return input_path, None
+    return None, "Dosya yükle ya da Drive/URL gir."
+
+
+def process_image(input_path, url, source: str, strength: str):
+    path, err = _resolve_input(input_path, url, prefix="dl_img_")
+    if err:
+        return None, err
     if source.startswith("ChatGPT"):
-        return strip_image_metadata(input_path)
-    return run_gemini_bypass(input_path, strength)
+        return strip_image_metadata(path)
+    return run_gemini_bypass(path, strength)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -195,14 +330,15 @@ def _video_source_warning(source: str) -> str:
     return ""
 
 
-def strip_video_metadata(input_path: str, source: str):
+def strip_video_metadata(input_path: str, url: str, source: str):
     _sweep_old_outputs()
-    if input_path is None:
-        return None, "Önce bir video yükle."
     if not FFMPEG_AVAILABLE:
         return None, "ffmpeg sistemde bulunamadı. `apt install ffmpeg` ile kur."
+    path, err = _resolve_input(input_path, url, prefix="dl_vid_")
+    if err:
+        return None, err
 
-    src = Path(input_path)
+    src = Path(path)
     src_size_mb = src.stat().st_size / (1024 * 1024)
 
     probe = _ffprobe_metadata(str(src))
@@ -329,6 +465,7 @@ def build_ui():
                     <span class="badge green">Image · ChatGPT: hazır</span>
                     {gemini_badge}
                     {video_badge}
+                    <span class="badge">Drive / URL: hazır</span>
                     <span class="badge">Ephemeral · 10 dk sonra otomatik silinir</span>
                 </div>
             </div>
@@ -341,6 +478,11 @@ def build_ui():
                 with gr.Row():
                     with gr.Column(scale=1):
                         img_in = gr.Image(type="filepath", label="Girdi resmi", height=360)
+                        img_url = gr.Textbox(
+                            label="…veya Drive / HTTPS linki",
+                            placeholder="https://drive.google.com/file/d/...",
+                            lines=1,
+                        )
                         img_source = gr.Radio(
                             choices=[
                                 "ChatGPT (metadata strip)",
@@ -368,7 +510,7 @@ def build_ui():
                         img_info = gr.Markdown(value="*Sonuç burada görünecek.*")
                 img_btn.click(
                     process_image,
-                    inputs=[img_in, img_source, img_strength],
+                    inputs=[img_in, img_url, img_source, img_strength],
                     outputs=[img_out, img_info],
                 )
 
@@ -377,6 +519,11 @@ def build_ui():
                 with gr.Row():
                     with gr.Column(scale=1):
                         vid_in = gr.Video(label="Girdi videosu", height=360)
+                        vid_url = gr.Textbox(
+                            label="…veya Drive / HTTPS linki",
+                            placeholder="https://drive.google.com/file/d/...",
+                            lines=1,
+                        )
                         vid_source = gr.Dropdown(
                             choices=VIDEO_SOURCES,
                             value="Higgsfield",
@@ -395,7 +542,7 @@ def build_ui():
                         vid_info = gr.Markdown(value="*Sonuç burada görünecek.*")
                 vid_btn.click(
                     strip_video_metadata,
-                    inputs=[vid_in, vid_source],
+                    inputs=[vid_in, vid_url, vid_source],
                     outputs=[vid_out, vid_info],
                 )
 
