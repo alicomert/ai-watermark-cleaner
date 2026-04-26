@@ -135,7 +135,32 @@ def _ffprobe_metadata(path: str) -> dict:
         return {}
 
 
-def strip_video_metadata(input_path: str):
+VIDEO_SOURCES = [
+    "Higgsfield",
+    "Runway",
+    "Pika",
+    "Sora (OpenAI)",
+    "Gemini Veo",
+    "Diğer / bilinmiyor",
+]
+
+
+def _video_source_warning(source: str) -> str:
+    if source.startswith("Gemini Veo"):
+        return (
+            "> ⚠️ **Gemini Veo içinde SynthID watermark frame-frame piksele gömülüdür.** "
+            "ffmpeg sadece container metadata'sını sıyırır — pixel watermark kalır. "
+            "Bu tool Veo videolarındaki SynthID'yi kaldıramaz."
+        )
+    if source.startswith("Sora"):
+        return (
+            "> ℹ️ **Sora videolarında sağ alt köşede görünür watermark vardır.** "
+            "Bu metadata strip onu kaldırmaz; görünür watermark için inpainting gerekir."
+        )
+    return ""
+
+
+def strip_video_metadata(input_path: str, source: str):
     if input_path is None:
         return None, "Önce bir video yükle."
     if not FFMPEG_AVAILABLE:
@@ -184,8 +209,10 @@ def strip_video_metadata(input_path: str):
         if stream_tags else "(yok)"
     )
 
+    warning = _video_source_warning(source)
     info = (
         f"### Video — Metadata Strip\n"
+        f"- **Kaynak:** {source}\n"
         f"- **Süre:** {duration:.1f} s · **Girdi:** {src_size_mb:.1f} MB · "
         f"**Çıktı:** {out_size_mb:.1f} MB\n"
         f"- **Container tag'leri:** {fmt_tags_str}\n"
@@ -193,6 +220,8 @@ def strip_video_metadata(input_path: str):
         f"- **İşlem:** stream copy (yeniden encode yok), tüm metadata + chapter sıyrıldı.\n"
         f"- **Çıktı dosyası:** `{out_path.name}`"
     )
+    if warning:
+        info += "\n\n" + warning
     return str(out_path), info
 
 
@@ -311,17 +340,25 @@ def build_ui():
                 with gr.Row():
                     with gr.Column(scale=1):
                         vid_in = gr.Video(label="Girdi videosu", height=360)
-                        vid_btn = gr.Button("Metadata strip", variant="primary", size="lg")
+                        vid_source = gr.Dropdown(
+                            choices=VIDEO_SOURCES,
+                            value="Higgsfield",
+                            label="Video kaynağı",
+                            info="Veo seçersen SynthID uyarısı gösterilir.",
+                        )
+                        vid_btn = gr.Button(
+                            "Metadata strip", variant="primary", size="lg"
+                        )
                         gr.Markdown(
-                            "_Higgsfield, Runway, Pika, Sora vs. çıktıları için. "
-                            "Yeniden encode yok — stream copy, kalite kaybı sıfır._"
+                            "_Stream copy — yeniden encode yok, kalite kaybı sıfır. "
+                            "Yalnızca **container/stream metadata** ve chapter bilgisi sıyrılır._"
                         )
                     with gr.Column(scale=1):
                         vid_out = gr.Video(label="Temizlenmiş video", height=360)
                         vid_info = gr.Markdown(value="*Sonuç burada görünecek.*")
                 vid_btn.click(
                     strip_video_metadata,
-                    inputs=[vid_in],
+                    inputs=[vid_in, vid_source],
                     outputs=[vid_out, vid_info],
                 )
 

@@ -6,7 +6,9 @@ Tek bir Gradio web arayüzünde iki iş:
 |-----|------|----------|----------|
 | Görsel | **ChatGPT (metadata strip)** | C2PA / EXIF / XMP metadata'yı sıyırır, piksel verisi aynı kalır. | OpenAI / DALL·E / GPT-image |
 | Görsel | **Gemini (SynthID V3 bypass)** | Spektral codebook subtraction ile SynthID watermark'ını düşürür. | Google Gemini / Imagen |
-| Video | **Container metadata strip** | ffmpeg ile container/stream metadata sıyrılır, stream copy — yeniden encode yok. | Higgsfield / Runway / Pika / Sora |
+| Video | **Container metadata strip** | ffmpeg ile container/stream metadata sıyrılır, stream copy — yeniden encode yok. | Higgsfield / Runway / Pika / Sora / Veo |
+
+> **Önemli:** Video tab'da kaynak seçtiğinde uyarı gösterilir. **Gemini Veo videolarında SynthID watermark frame'lere gömülüdür** ve metadata strip'le çıkmaz. Sora videolarında ise sağ alt köşede görünür watermark vardır; o ancak inpainting ile kaldırılır.
 
 > **Not:** OpenAI **SynthID kullanmaz** — SynthID, Google DeepMind'ın tescilli teknolojisidir ve sadece Gemini/Imagen/Veo/Lyria çıktılarında bulunur. ChatGPT görselleri için metadata strip genelde yeterlidir.
 
