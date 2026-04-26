@@ -2,10 +2,11 @@
 
 Tek bir Gradio web arayüzünde iki iş:
 
-| Mode | Ne yapar | Kim için |
-|------|----------|----------|
-| **ChatGPT (metadata strip)** | C2PA / EXIF / XMP metadata'yı sıyırır, piksel verisi aynı kalır. | OpenAI / DALL·E / GPT-image çıktıları |
-| **Gemini (SynthID V3 bypass)** | Spektral codebook subtraction ile SynthID watermark'ını düşürür. | Google Gemini / Imagen çıktıları |
+| Tab | Mode | Ne yapar | Kim için |
+|-----|------|----------|----------|
+| Görsel | **ChatGPT (metadata strip)** | C2PA / EXIF / XMP metadata'yı sıyırır, piksel verisi aynı kalır. | OpenAI / DALL·E / GPT-image |
+| Görsel | **Gemini (SynthID V3 bypass)** | Spektral codebook subtraction ile SynthID watermark'ını düşürür. | Google Gemini / Imagen |
+| Video | **Container metadata strip** | ffmpeg ile container/stream metadata sıyrılır, stream copy — yeniden encode yok. | Higgsfield / Runway / Pika / Sora |
 
 > **Not:** OpenAI **SynthID kullanmaz** — SynthID, Google DeepMind'ın tescilli teknolojisidir ve sadece Gemini/Imagen/Veo/Lyria çıktılarında bulunur. ChatGPT görselleri için metadata strip genelde yeterlidir.
 
@@ -25,6 +26,12 @@ Tarayıcı: `http://<vps-ip>:7860` (lokalse `http://localhost:7860`).
 
 `setup.sh` venv'i kurar, bağımlılıkları yükler ve **Gemini modu** için
 [`aloshdenny/reverse-SynthID`](https://github.com/aloshdenny/reverse-SynthID) reposunu `vendor/` altına klonlar (V3 codebook ~5 MB).
+
+Video tab için sistemde `ffmpeg` ve `ffprobe` kurulu olmalı:
+
+```bash
+sudo apt install -y ffmpeg
+```
 
 ---
 

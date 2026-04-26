@@ -1,11 +1,16 @@
 """AI Watermark Cleaner — Gradio web UI.
 
-ChatGPT modu: C2PA / EXIF / XMP metadata strip.
-Gemini modu : SynthID V3 spektral bypass (upstream: aloshdenny/reverse-SynthID).
+- Image / ChatGPT modu : C2PA / EXIF / XMP metadata strip
+- Image / Gemini modu  : SynthID V3 spektral bypass (upstream: aloshdenny/reverse-SynthID)
+- Video tab            : ffmpeg ile container metadata strip (Higgsfield, Runway, Pika, Sora vs.)
 """
 from __future__ import annotations
 
+import json
 import os
+import shlex
+import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -35,12 +40,19 @@ if GEMINI_AVAILABLE:
         GEMINI_AVAILABLE = False
         GEMINI_LOAD_ERROR = f"{type(exc).__name__}: {exc}"
 
+FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None
+FFPROBE_AVAILABLE = shutil.which("ffprobe") is not None
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Image handlers
+# ────────────────────────────────────────────────────────────────────────
 
 def _has(keys, *needles) -> bool:
     return any(any(n in k.lower() for n in needles) for k in keys)
 
 
-def strip_metadata(input_path: str):
+def strip_image_metadata(input_path: str):
     img = Image.open(input_path)
     img.load()
 
@@ -57,7 +69,7 @@ def strip_metadata(input_path: str):
     clean.save(out_path, format="PNG", pnginfo=PngImagePlugin.PngInfo())
 
     info = (
-        f"### Mode: ChatGPT — Metadata Strip\n"
+        f"### Image — Metadata Strip\n"
         f"- **Çözünürlük:** {img.size[0]} × {img.size[1]}\n"
         f"- **Algılanan metadata:** {', '.join(src_keys) if src_keys else '(yok)'}\n"
         f"- **EXIF:** {'temizlendi ✓' if has_exif else 'yoktu'}\n"
@@ -87,25 +99,106 @@ def run_gemini_bypass(input_path: str, strength: str):
 
     success_badge = "✓ başarılı" if result.success else "⚠ kısmen"
     info = (
-        f"### Mode: Gemini — SynthID V3 Bypass\n"
+        f"### Image — Gemini SynthID V3 Bypass\n"
         f"- **Strength:** `{strength}`\n"
         f"- **PSNR:** {result.psnr:.2f} dB\n"
         f"- **SSIM:** {result.ssim:.4f}\n"
         f"- **Profil:** {result.details['profile_resolution']} "
-        f"(exact match: {result.details['exact_match']})\n"
+        f"(exact: {result.details['exact_match']})\n"
         f"- **Pass schedule:** {', '.join(result.stages_applied)}\n"
         f"- **Sonuç:** {success_badge}"
     )
     return str(out_path), info
 
 
-def process(input_path, source: str, strength: str):
+def process_image(input_path, source: str, strength: str):
     if input_path is None:
         return None, "Önce bir resim yükle."
     if source.startswith("ChatGPT"):
-        return strip_metadata(input_path)
+        return strip_image_metadata(input_path)
     return run_gemini_bypass(input_path, strength)
 
+
+# ────────────────────────────────────────────────────────────────────────
+# Video handler
+# ────────────────────────────────────────────────────────────────────────
+
+def _ffprobe_metadata(path: str) -> dict:
+    if not FFPROBE_AVAILABLE:
+        return {}
+    cmd = ["ffprobe", "-v", "quiet", "-print_format", "json",
+           "-show_format", "-show_streams", path]
+    try:
+        out = subprocess.check_output(cmd, timeout=30).decode("utf-8", "replace")
+        return json.loads(out)
+    except Exception:
+        return {}
+
+
+def strip_video_metadata(input_path: str):
+    if input_path is None:
+        return None, "Önce bir video yükle."
+    if not FFMPEG_AVAILABLE:
+        return None, "ffmpeg sistemde bulunamadı. `apt install ffmpeg` ile kur."
+
+    src = Path(input_path)
+    src_size_mb = src.stat().st_size / (1024 * 1024)
+
+    probe = _ffprobe_metadata(str(src))
+    fmt_tags = (probe.get("format", {}) or {}).get("tags", {}) or {}
+    stream_tags = []
+    for s in probe.get("streams", []) or []:
+        t = (s.get("tags") or {})
+        if t:
+            stream_tags.append({k: v for k, v in t.items() if k.lower()
+                                not in ("language", "handler_name")})
+    duration = float((probe.get("format", {}) or {}).get("duration", 0) or 0)
+
+    out_dir = Path(tempfile.mkdtemp(prefix="vidclean_"))
+    out_path = out_dir / f"cleaned{src.suffix or '.mp4'}"
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(src),
+        "-map_metadata", "-1",
+        "-map_chapters", "-1",
+        "-c", "copy",
+        "-movflags", "+faststart",
+        "-fflags", "+bitexact",
+        "-flags:v", "+bitexact",
+        "-flags:a", "+bitexact",
+        str(out_path),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    if proc.returncode != 0:
+        return None, f"ffmpeg hata:\n```\n{proc.stderr[-1500:]}\n```"
+
+    out_size_mb = out_path.stat().st_size / (1024 * 1024)
+
+    fmt_tags_str = (
+        ", ".join(f"`{k}`" for k in fmt_tags.keys())
+        if fmt_tags else "(yok)"
+    )
+    stream_tags_str = (
+        "; ".join(", ".join(f"`{k}`" for k in t.keys()) or "(yok)" for t in stream_tags)
+        if stream_tags else "(yok)"
+    )
+
+    info = (
+        f"### Video — Metadata Strip\n"
+        f"- **Süre:** {duration:.1f} s · **Girdi:** {src_size_mb:.1f} MB · "
+        f"**Çıktı:** {out_size_mb:.1f} MB\n"
+        f"- **Container tag'leri:** {fmt_tags_str}\n"
+        f"- **Stream tag'leri:** {stream_tags_str}\n"
+        f"- **İşlem:** stream copy (yeniden encode yok), tüm metadata + chapter sıyrıldı.\n"
+        f"- **Çıktı dosyası:** `{out_path.name}`"
+    )
+    return str(out_path), info
+
+
+# ────────────────────────────────────────────────────────────────────────
+# UI
+# ────────────────────────────────────────────────────────────────────────
 
 CUSTOM_CSS = """
 #hero {
@@ -149,9 +242,14 @@ footer { display: none !important; }
 
 def build_ui():
     gemini_badge = (
-        '<span class="badge green">Gemini: hazır</span>'
+        '<span class="badge green">Image · Gemini: hazır</span>'
         if GEMINI_AVAILABLE
-        else '<span class="badge amber">Gemini: kurulmamış (bash setup.sh)</span>'
+        else '<span class="badge amber">Image · Gemini: kurulmamış (bash setup.sh)</span>'
+    )
+    video_badge = (
+        '<span class="badge green">Video: hazır</span>'
+        if FFMPEG_AVAILABLE
+        else '<span class="badge amber">Video: ffmpeg yok</span>'
     )
 
     with gr.Blocks(title="AI Watermark Cleaner") as demo:
@@ -159,56 +257,78 @@ def build_ui():
             f"""
             <div id="hero">
                 <h1>AI Watermark Cleaner</h1>
-                <p>ChatGPT görsellerinden C2PA / EXIF / XMP metadata'yı sıyır,
-                Gemini görsellerinden SynthID watermark'ını spektral bypass ile düşür.</p>
+                <p>ChatGPT &amp; Higgsfield &amp; Runway gibi servislerin görsel/video çıktılarından
+                C2PA / EXIF / XMP metadata'yı sıyır. Gemini görselleri için SynthID watermark'ını
+                spektral bypass ile düşür.</p>
                 <div style="margin-top: 12px;">
-                    <span class="badge green">ChatGPT: hazır</span>
+                    <span class="badge green">Image · ChatGPT: hazır</span>
                     {gemini_badge}
-                    <span class="badge">Gradio · Pillow · NumPy</span>
+                    {video_badge}
                 </div>
             </div>
             """
         )
 
-        with gr.Row():
-            with gr.Column(scale=1):
-                inp = gr.Image(type="filepath", label="Girdi resmi", height=360)
-                source = gr.Radio(
-                    choices=[
-                        "ChatGPT (metadata strip)",
-                        "Gemini (SynthID V3 bypass)",
-                    ],
-                    value="ChatGPT (metadata strip)",
-                    label="Kaynak modeli",
-                )
-                strength = gr.Radio(
-                    choices=["gentle", "moderate", "aggressive", "maximum"],
-                    value="aggressive",
-                    label="Strength (sadece Gemini modunda etkili)",
-                )
-                btn = gr.Button("Temizle", variant="primary", size="lg")
-                gr.Markdown(
-                    "_ChatGPT/DALL·E için **metadata strip** yeterlidir — "
-                    "OpenAI SynthID kullanmaz._"
+        with gr.Tabs():
+            # ─────────── Image tab ───────────
+            with gr.Tab("Görsel"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        img_in = gr.Image(type="filepath", label="Girdi resmi", height=360)
+                        img_source = gr.Radio(
+                            choices=[
+                                "ChatGPT (metadata strip)",
+                                "Gemini (SynthID V3 bypass)",
+                            ],
+                            value="ChatGPT (metadata strip)",
+                            label="Kaynak modeli",
+                        )
+                        img_strength = gr.Radio(
+                            choices=["gentle", "moderate", "aggressive", "maximum"],
+                            value="aggressive",
+                            label="Strength (sadece Gemini modunda etkili)",
+                        )
+                        img_btn = gr.Button("Temizle", variant="primary", size="lg")
+                        gr.Markdown(
+                            "_OpenAI **SynthID kullanmaz** — ChatGPT/DALL·E "
+                            "için metadata strip yeterlidir._"
+                        )
+                    with gr.Column(scale=1):
+                        img_out = gr.Image(
+                            type="filepath",
+                            label="Temizlenmiş çıktı",
+                            height=360,
+                        )
+                        img_info = gr.Markdown(value="*Sonuç burada görünecek.*")
+                img_btn.click(
+                    process_image,
+                    inputs=[img_in, img_source, img_strength],
+                    outputs=[img_out, img_info],
                 )
 
-            with gr.Column(scale=1):
-                out = gr.Image(
-                    type="filepath",
-                    label="Temizlenmiş çıktı (sağ üstten indir)",
-                    height=360,
+            # ─────────── Video tab ───────────
+            with gr.Tab("Video"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        vid_in = gr.Video(label="Girdi videosu", height=360)
+                        vid_btn = gr.Button("Metadata strip", variant="primary", size="lg")
+                        gr.Markdown(
+                            "_Higgsfield, Runway, Pika, Sora vs. çıktıları için. "
+                            "Yeniden encode yok — stream copy, kalite kaybı sıfır._"
+                        )
+                    with gr.Column(scale=1):
+                        vid_out = gr.Video(label="Temizlenmiş video", height=360)
+                        vid_info = gr.Markdown(value="*Sonuç burada görünecek.*")
+                vid_btn.click(
+                    strip_video_metadata,
+                    inputs=[vid_in],
+                    outputs=[vid_out, vid_info],
                 )
-                info = gr.Markdown(
-                    value="*Sonuç burada görünecek.*",
-                    label="Detaylar",
-                )
-
-        btn.click(process, inputs=[inp, source, strength], outputs=[out, info])
 
         gr.Markdown(
             "<div style='text-align:center; opacity:0.6; font-size:12px; "
             "margin-top:18px;'>"
-            "Gemini bypass kodu: "
+            "Gemini bypass çekirdeği: "
             "<a href='https://github.com/aloshdenny/reverse-SynthID' "
             "target='_blank'>aloshdenny/reverse-SynthID</a> · "
             "Bu UI MIT lisansı altında dağıtılır."
