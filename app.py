@@ -122,7 +122,7 @@ def fetch_url_to_temp(url: str, dir_prefix: str = "dl_") -> Path:
         if gdown is None:
             raise RuntimeError("gdown kurulu değil — `pip install gdown`.")
         out_path = out_dir / "download"
-        gdown.download(id=drive_id, output=str(out_path), quiet=True, fuzzy=True)
+        gdown.download(id=drive_id, output=str(out_path), quiet=True)
         if not out_path.exists() or out_path.stat().st_size == 0:
             raise RuntimeError(
                 "Drive dosyası indirilemedi. Link 'linke sahip olan herkes' "
