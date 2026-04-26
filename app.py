@@ -6,18 +6,51 @@
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
-import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
 import gradio as gr
 from PIL import Image, PngImagePlugin
+
+# Disable Gradio's anonymous usage telemetry.
+os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
+
+TMP_ROOT = Path(tempfile.gettempdir())
+TMP_PREFIXES = ("clean_", "bypass_", "vidclean_")
+RETENTION_SECONDS = 10 * 60  # 10 dakikadan eski tüm çıktılar silinir
+
+
+def _sweep_old_outputs() -> None:
+    """Remove temp dirs older than RETENTION_SECONDS so cleaned files don't linger."""
+    now = time.time()
+    for entry in TMP_ROOT.iterdir() if TMP_ROOT.is_dir() else []:
+        if not entry.is_dir():
+            continue
+        if not entry.name.startswith(TMP_PREFIXES):
+            continue
+        try:
+            if now - entry.stat().st_mtime > RETENTION_SECONDS:
+                shutil.rmtree(entry, ignore_errors=True)
+        except OSError:
+            pass
+
+
+def _purge_all_outputs() -> None:
+    """Wipe every output dir on shutdown."""
+    for entry in TMP_ROOT.iterdir() if TMP_ROOT.is_dir() else []:
+        if entry.is_dir() and entry.name.startswith(TMP_PREFIXES):
+            shutil.rmtree(entry, ignore_errors=True)
+
+
+atexit.register(_purge_all_outputs)
 
 ROOT = Path(__file__).resolve().parent
 VENDOR = ROOT / "vendor" / "reverse-SynthID"
@@ -53,6 +86,7 @@ def _has(keys, *needles) -> bool:
 
 
 def strip_image_metadata(input_path: str):
+    _sweep_old_outputs()
     img = Image.open(input_path)
     img.load()
 
@@ -81,6 +115,7 @@ def strip_image_metadata(input_path: str):
 
 
 def run_gemini_bypass(input_path: str, strength: str):
+    _sweep_old_outputs()
     if not GEMINI_AVAILABLE:
         msg = "Gemini modu yüklü değil. `bash setup.sh` ile reverse-SynthID vendor'ını kur."
         if GEMINI_LOAD_ERROR:
@@ -161,6 +196,7 @@ def _video_source_warning(source: str) -> str:
 
 
 def strip_video_metadata(input_path: str, source: str):
+    _sweep_old_outputs()
     if input_path is None:
         return None, "Önce bir video yükle."
     if not FFMPEG_AVAILABLE:
@@ -293,6 +329,7 @@ def build_ui():
                     <span class="badge green">Image · ChatGPT: hazır</span>
                     {gemini_badge}
                     {video_badge}
+                    <span class="badge">Ephemeral · 10 dk sonra otomatik silinir</span>
                 </div>
             </div>
             """
@@ -365,6 +402,8 @@ def build_ui():
         gr.Markdown(
             "<div style='text-align:center; opacity:0.6; font-size:12px; "
             "margin-top:18px;'>"
+            "🔒 <b>Gizlilik:</b> hiçbir dosya kalıcı olarak saklanmaz; "
+            "çıktılar 10 dakika sonra sunucudan silinir, telemetri kapalı.<br/>"
             "Gemini bypass çekirdeği: "
             "<a href='https://github.com/aloshdenny/reverse-SynthID' "
             "target='_blank'>aloshdenny/reverse-SynthID</a> · "

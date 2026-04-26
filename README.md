@@ -69,6 +69,13 @@ systemd servisi olarak çalıştırmak istersen `app.service` dosyası ekleyebil
 - Bu UI: **MIT** ([`LICENSE`](LICENSE))
 - Gemini bypass çekirdeği: [aloshdenny/reverse-SynthID](https://github.com/aloshdenny/reverse-SynthID) — kendi lisansı altında, vendor/ ile ayrı klonlanır.
 
+## Gizlilik
+
+- Yüklenen dosyalar ve temizlenmiş çıktılar yalnızca temp klasörlerinde tutulur (`/tmp/clean_*`, `/tmp/bypass_*`, `/tmp/vidclean_*`).
+- Her istekte 10 dakikadan eski çıktılar otomatik silinir; sunucu kapatılırken hepsi temizlenir.
+- Gradio'nun anonim telemetri'si (`GRADIO_ANALYTICS_ENABLED=False`) kapalı, `show_api=False`.
+- Hiçbir dış servise yükleme yapılmaz, hiçbir log dosyaya işlenmez.
+
 ## Sorumluluk
 
 Yalnızca **araştırma ve eğitim** amaçlıdır. AI üretimi içeriği insan üretimi gibi sunmak için kullanma.
